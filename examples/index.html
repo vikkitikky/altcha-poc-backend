@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ALTCHA: нативная интеграция</title>
+<style>
+  body { max-width: 42rem; margin: 4rem auto; padding: 0 1rem; font: 17px/1.5 system-ui; color: #182b38; }
+  form { display: grid; gap: 1rem; } input, button { padding: .7rem; font: inherit; }
+  output { display: block; margin-top: 1rem; white-space: pre-wrap; }
+</style>
+<h1>Проверка CAPTCHA</h1>
+<p>ALTCHA Widget 3.5.0 → CAPTCHA MS → Business MS</p>
+<form>
+  <label>Сообщение <input name="message" required maxlength="2000" value="Проверка нативного протокола"></label>
+  <altcha-widget></altcha-widget>
+  <button disabled>Отправить в Business MS</button>
+</form>
+<output role="status"></output>
+<script>
+  const form = document.querySelector('form');
+  const widget = document.querySelector('altcha-widget');
+  const button = document.querySelector('button');
+  const output = document.querySelector('output');
+  widget.addEventListener('load', async () => {
+    await widget.configure({
+      challenge: 'http://127.0.0.1:3001/api/captcha/challenge?site_id=example&action=submit_form',
+      verifyUrl: 'http://127.0.0.1:3001/api/captcha/verify',
+    });
+  }, { once: true });
+  widget.addEventListener('statechange', event => { button.disabled = event.detail.state !== 'verified'; });
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); button.disabled = true;
+    const fields = new FormData(form);
+    try {
+      const response = await fetch('http://127.0.0.1:3002/api/business/submit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: fields.get('message'), payload: fields.get('altcha') }),
+      });
+      output.textContent = JSON.stringify(await response.json(), null, 2);
+    } catch { output.textContent = 'Business MS недоступен'; }
+    finally { widget.reset(); }
+  });
+</script>
+<script type="module" src="/widget.js"></script>
+</html>

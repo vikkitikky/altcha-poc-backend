@@ -1,75 +1,72 @@
-# ALTCHA PoC backend
+# CAPTCHA MS: нативный ALTCHA Widget 3.5.0
 
-Самостоятельный Fastify backend исследовательского ALTCHA PoC. Перенесён из `altcha-poc/backend`; исходники frontend и его зависимости для установки, тестов, сборки и запуска не нужны.
+Ветка `altcha-native-backend` — отдельная реализация backend с modern PoW v2, публичной server verification и однократным серверным подтверждением для Business MS. Исходный PoC сохранён в `main` на коммите `9033596`.
 
-## Запуск
+Виджет получает challenge по штатному URL, решает PoW в worker, самостоятельно отправляет исходный payload на `verifyUrl` и помещает возвращённый JWT в скрытое поле `altcha`. Frontend не адаптирует транспорт CAPTCHA и не хранит challenge ID или политику.
 
-Нужен Node.js 22.12+; версия окружения указана в `.nvmrc`.
+## Локальный запуск
+
+Нужны Node.js 22.12+, npm и Redis. Compose запускает только локальный Redis; можно использовать собственный Redis по `REDIS_URL`.
 
 ```sh
-cd /Users/viktoria/WebstormProjects/altcha-poc-backend
+git switch altcha-native-backend
 npm ci
 npm run setup:env
+docker compose up -d redis
 npm run dev
 ```
 
-Существующие зависимости и `.env` уже перенесены. `setup:env` не заменяет имеющийся файл. Новый `.env` создаётся из `.env.example` с правами `0600` и случайным секретом без вывода значения. Файл игнорируется Git. Если `.env` отсутствует, сервер использует случайный секрет в памяти.
+`setup:env` создаёт `.env.native` с правами `0600` и тремя независимыми случайными секретами. Он не заменяет существующий `.env.native` и не изменяет `.env` исходного backend. Сервер новой ветки читает только `.env.native` и переменные окружения; при отсутствии необходимых ключей запуск прекращается.
 
-По умолчанию API слушает `http://127.0.0.1:3001`. Проверка: `GET /api/health` → `{ "ok": true }`.
+CAPTCHA MS: `http://127.0.0.1:3001`, readiness: `GET /api/health` (проверяет также Redis).
 
-Frontend запускается отдельно: `cd ../altcha-poc && npm run dev`, доступен на `http://127.0.0.1:5173`. Его Vite proxy направляет `/api` на порт 3001. Смена структуры проектов не меняет URL API.
-
-## Команды
+Для полного локального сценария запустите ещё в двух терминалах:
 
 ```sh
-npm run typecheck               # Исходники, серверные тесты и CLI scripts
-npm test                        # 40 серверных тестов
-npm run build                   # dist/
-npm start                       # Запуск собранного dist/server.js
-npm run demo:security           # Реальный HTTP PoW demo; нужен запущенный backend
-npm run probe:server-signature  # Изолированное исследование server signatures
+npm run demo:business   # Business MS на 127.0.0.1:3002
+npm run demo:frontend   # Страница с настоящим виджетом на 127.0.0.1:3000
 ```
 
-`demo:security` по умолчанию обращается напрямую к `http://127.0.0.1:3001`; другой адрес задаётся переменной `DEMO_ORIGIN`. В режиме image CLI показывает путь к PNG и просит ввести код вручную в интерактивном терминале.
+Откройте `http://127.0.0.1:3000`, пройдите проверку и отправьте форму. Business MS вызывает `/internal/captcha/validate` по HTTP перед демонстрационной операцией. Повторная отправка того же подтверждения отклоняется. Это пример бизнес-интеграции, без собственной бизнес-БД и пользовательской авторизации.
 
-## Структура
+## HIS
 
-- `src/app.ts` — factory Fastify, маршруты, cookie, CORS, лимиты и обработка ошибок.
-- `src/server.ts` — загрузка `.env`, запуск и остановка.
-- `src/captcha.ts`, `image-captcha.ts`, `his.ts`, `session.ts` — исходный сценарий PoW + картинка/HIS/сессия.
-- `src/ms-captcha.ts`, `ms-business.ts`, `ms-routes.ts` — экспериментальные mock CAPTCHA MS и Business MS.
-- `test/` — только серверные тесты; нет импортов frontend.
-- `scripts/` — настройка окружения и исследовательские CLI.
+По умолчанию `HIS_ENABLED=false`. Для нативного handshake установите `HIS_ENABLED=true` в `.env.native` и перезапустите CAPTCHA MS. В ALTCHA 3.5.0 collector включён по умолчанию. Если frontend отключал его, включите `humanInteractionSignature: true` до монтирования виджета.
 
-Два теста, использующие одновременно frontend и backend, сохранены в `../altcha-poc/integration`. Они запускаются из frontend-проекта через `npm run test:integration` и не входят в независимые проверки этого проекта. Браузерный `npm run test:ms:browser` запускается там же и обращается к этому backend по HTTP; настройка адреса — `CAPTCHA_API_ORIGIN`.
+Сервер принимает и проверяет структуру снимка; исходные наблюдения сразу отбрасывает. Поведенческого анализа и доказательства присутствия человека это не даёт. Графические задания не реализованы: `altcha-lib` не содержит их генератора и проверки ответов. Подробности и первоисточники — в `docs/altcha-research.md`.
 
-## API
+## Проверки
 
-| Endpoint | Назначение |
-| --- | --- |
-| `GET /api/health` | Готовность процесса |
-| `GET /api/captcha/challenge` | HIS handshake исходного сценария |
-| `POST /api/captcha/challenge` | Подписанный challenge с HIS и опциональной картинкой |
-| `POST /api/captcha/verify` | Проверка PoW и введённых символов |
-| `POST /api/demo/submit` | Проверка и однократное использование исходного результата |
-| `POST /api/captcha/challenges` | Envelope проектируемого CAPTCHA MS |
-| `POST /api/captcha/verifications` | Предварительная проверка и серверная запись |
-| `POST /api/business/submit` | Экспериментальные режимы PoW / verification_id через X-Captcha-Payload |
+```sh
+npm run typecheck
+npm test
+npm run test:browser
+npm run build
+```
 
-Новые MS-сценарии доступны во frontend на `/captcha-ms`. Режимы A/B остаются гипотезами контракта, хранилища находятся в памяти, внутренний вызов Business MS → CAPTCHA MS моделируется внутри процесса. Состояние теряется при перезапуске; это исследовательский PoC.
+Серверные тесты и браузерный harness запускают собственные временные Redis-процессы с уникальными namespace, не используют и не очищают ваш Redis. Установите `redis-server` в PATH либо укажите путь через `REDIS_SERVER_BINARY`.
 
-## Окружение
+На macOS браузерные тесты по умолчанию используют установленный Google Chrome. В другом окружении выполните `npx playwright install chromium`. Другой исполняемый файл задаётся через `CHROME_EXECUTABLE`.
 
-| Переменная | По умолчанию | Назначение |
-| --- | --- | --- |
-| `HMAC_SECRET` | Случайный в памяти | Серверный секрет длиной от 32 символов |
-| `HOST` | `127.0.0.1` | Адрес сервера |
-| `PORT` | `3001` | Порт API |
-| `CORS_ORIGINS` | `http://localhost:3000` | Точные origins через запятую; для Vite proxy CORS не требуется |
-| `SESSION_TTL_SECONDS` | `3600` | Время жизни сессии |
-| `CHALLENGE_TTL_SECONDS` | `120` | TTL исходного challenge |
-| `POW_COST` | `1000` | PBKDF2 cost исходного сценария |
-| `CAPTCHA_MODE` | `image` | `image` / `pow` для исходного сценария |
-| `LOG_LEVEL` | `info` | Уровень логов |
+Если среда запрещает запуск дочернего браузера, используйте тот же набор тестов в уже доступном браузере:
 
-Настройки MS fault injection передаются отдельным заголовком `X-Poc-Mock`. Они не являются production API. Контракт, результаты и ограничения экспериментов описаны в `../altcha-poc/docs/captcha-ms-poc.md`.
+```sh
+npm run test:browser:interactive
+```
+
+Откройте напечатанный локальный URL `/suite`. Страница автоматически запускает четыре сценария на реальном `altcha@3.5.0`; терминал сообщает результат и завершает временные сервисы. Этот запуск пишет обезличенный отчёт `docs/browser-results.json`. `npm run check` объединяет typecheck, серверные тесты, Playwright и сборку.
+
+## Документация и сравнение
+
+- `docs/api.md` — публичный и внутренний API, примеры frontend и Business MS.
+- `docs/architecture.md` — схема взаимодействия, политики, Redis, ключи, ограничения и эксплуатация.
+- `docs/altcha-research.md` — версии, лицензия, анализ библиотеки, графических заданий и HIS.
+- `docs/verification.md` — результаты и границы выполненных проверок.
+
+```sh
+git log --oneline main..altcha-native-backend
+git diff --stat main..altcha-native-backend
+git diff main..altcha-native-backend -- src package.json docs README.md
+```
+
+`main` не изменялась, merge/rebase и push не выполнялись. При переключении между вариантами выполните `npm ci`, чтобы локальные зависимости соответствовали lockfile выбранной ветки. Возвращать старый код из копий не требуется.

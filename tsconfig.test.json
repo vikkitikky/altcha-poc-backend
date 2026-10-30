@@ -4,12 +4,15 @@
     "rootDir": ".",
     "noEmit": true,
     "lib": [
-      "ES2023"
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
     ]
   },
   "include": [
     "src",
     "test",
-    "scripts"
+    "scripts",
+    "examples"
   ]
 }

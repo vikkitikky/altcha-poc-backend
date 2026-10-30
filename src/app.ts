@@ -1,140 +1,100 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify, { LogController } from 'fastify';
-import cookie from '@fastify/cookie';
-import rateLimit from '@fastify/rate-limit';
 import cors from '@fastify/cors';
-import { CaptchaError, CaptchaStore } from './captcha.js';
-import { CapacityError, SessionStore, type Session } from './session.js';
-import type { CaptchaImage } from './image-captcha.js';
+import { assertOrigin, idPattern, resolveContext, validateConfig, type CaptchaConfig } from './config.js';
+import { ApiError } from './errors.js';
 import { HisError, parseHis } from './his.js';
-import { registerMsRoutes } from './ms-routes.js';
-
-declare module 'fastify' {
-  interface FastifyRequest { anonymousSession: Session }
-}
+import { CaptchaService } from './service.js';
+import { RedisStore } from './store.js';
 
 export interface AppOptions {
-  hmacSecret: string;
-  sessionTtlSeconds?: number;
-  challengeTtlSeconds?: number;
-  powCost?: number;
-  imageCaptcha?: boolean;
-  imageFactory?: () => CaptchaImage;
-  corsOrigins?: string[];
+  config: CaptchaConfig;
+  store: RedisStore;
   logger?: boolean | { level: string };
+  rateLimit?: number;
 }
-
+const identifier = { type: 'string', pattern: idPattern.source, maxLength: 100 };
+const querySchema = { type: 'object', required: ['site_id'], additionalProperties: false,
+  properties: { site_id: identifier, action: identifier, policy: identifier } };
+type Query = { site_id: string; action?: string; policy?: string };
 export async function buildApp(options: AppOptions) {
-  if (options.hmacSecret.length < 32) throw new Error('HMAC_SECRET must contain at least 32 characters');
-  const corsOrigins = [...(options.corsOrigins ?? ['http://localhost:3000'])];
-  for (const origin of corsOrigins) {
-    let url: URL;
-    try { url = new URL(origin); }
-    catch { throw new Error('CORS_ORIGINS must contain exact HTTP(S) origins without paths or wildcards'); }
-    if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin) {
-      throw new Error('CORS_ORIGINS must contain exact HTTP(S) origins without paths or wildcards');
-    }
-  }
-  const app = Fastify({
-    logger: options.logger ?? false,
-    bodyLimit: 32_768,
+  validateConfig(options.config);
+  const config = structuredClone(options.config);
+  const app = Fastify({ logger: options.logger ?? false, bodyLimit: 32768, trustProxy: false,
+    ajv: { customOptions: { removeAdditional: false, coerceTypes: false, allErrors: false } },
     logController: new LogController({ disableRequestLogging: true }),
-  });
-  const sessions = new SessionStore(options.sessionTtlSeconds ?? 3600);
-  const captcha = new CaptchaStore(
-    options.hmacSecret, options.challengeTtlSeconds ?? 120, options.powCost ?? 1000,
-    options.imageCaptcha ?? true, options.imageFactory,
-  );
-  // Complete browser preflights before session creation: OPTIONS has no credentials.
-  await app.register(cors, {
-    origin: corsOrigins,
-    credentials: true,
-    methods: ['GET', 'HEAD', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-Captcha-Payload', 'X-Poc-Mock'],
-    maxAge: 600,
-  });
-  await app.register(cookie);
-  await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
-  app.decorateRequest('anonymousSession');
+    requestTimeout: 10000, connectionTimeout: 10000 });
+  const service = new CaptchaService(config, options.store);
+  // Attach authorization scopes without exposing credentials on request/logs.
+  const serviceScopes = new WeakMap<object, string[]>();
+  const origins = [...new Set(Object.values(config.sites).flatMap((site) => site.origins))];
+  await app.register(cors, { origin: origins, methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type'], maxAge: 600 });
   app.addHook('onRequest', async (request, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    reply.header('X-Content-Type-Options', 'nosniff');
-    request.anonymousSession = sessions.getOrCreate(request, reply);
+    reply.header('Cache-Control', 'no-store').header('X-Content-Type-Options', 'nosniff');
+    if (request.routeOptions.url === '/api/health' || request.method === 'OPTIONS') return;
+    const key = createHash('sha256').update(request.ip).digest('hex');
+    if (!await options.store.takeRate(key, options.rateLimit ?? 120, 60)) {
+      reply.header('Retry-After', '60'); throw new ApiError(429, 'RATE_LIMITED');
+    }
+    if (request.headers.origin && !origins.includes(request.headers.origin)) throw new ApiError(403, 'ORIGIN_FORBIDDEN');
   });
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof HisError) {
-      request.log.info({ event: 'his_rejected', code: error.code }, error.message);
-      return reply.code(400).send({ success: false, code: error.code, message: error.message });
+    if (error instanceof HisError) return reply.code(400).send({ verified: false, error: error.code });
+    if (error instanceof ApiError) return reply.code(error.status).send({ verified: false, error: error.code });
+    if (error instanceof Error && 'statusCode' in error && typeof error.statusCode === 'number' && error.statusCode >= 400 && error.statusCode < 500) {
+      return reply.code(error.statusCode).send({ verified: false, error: 'REQUEST_INVALID' });
     }
-    if (error instanceof CaptchaError) {
-      request.log.info({ event: 'verification_rejected', code: error.code }, error.message);
-      return reply.code(error.status).send({ success: false, code: error.code, message: error.message });
-    }
-    if (error instanceof CapacityError) {
-      return reply.code(503).send({ success: false, code: 'CAPACITY_REACHED', message: 'Лимит локального хранилища; повторите позже' });
-    }
-    if (error instanceof Error && 'statusCode' in error && typeof error.statusCode === 'number'
-      && error.statusCode >= 400 && error.statusCode < 500) {
-      return reply.code(error.statusCode).send({ success: false, code: 'REQUEST_INVALID', message: 'Недопустимый запрос или превышен лимит запросов' });
-    }
-    request.log.error({ event: 'internal_error', errorType: error instanceof Error ? error.name : 'Unknown' }, 'Внутренняя ошибка');
-    return reply.code(500).send({ success: false, code: 'INTERNAL_ERROR', message: 'Внутренняя ошибка сервера' });
+    request.log.error({ event: 'internal_error', errorType: error instanceof Error ? error.name : 'Unknown' }, 'Internal request failure');
+    return reply.code(500).send({ verified: false, error: 'INTERNAL_ERROR' });
   });
-  app.get('/api/health', async () => ({ ok: true }));
-  registerMsRoutes(app, options.hmacSecret);
-  app.get('/api/captcha/challenge', {
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-  }, async () => ({ his: { url: '/api/captcha/challenge' } }));
-  app.post<{ Body: { his?: unknown } }>('/api/captcha/challenge', {
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-    schema: {
-      body: { type: 'object', additionalProperties: false, properties: { his: {} } },
-    },
+  app.get('/api/health', async () => { await options.store.ping(); return { ok: true }; });
+  app.get<{ Querystring: Query }>('/api/captcha/challenge', { schema: { querystring: querySchema } }, async (request) => {
+    const context = resolveContext(config, request.query.site_id, request.query.action, request.query.policy);
+    assertOrigin(config, context, request.headers.origin);
+    if (config.hisEnabled) {
+      return { his: { url: `/api/captcha/challenge?${new URLSearchParams({ ...context })}` } };
+    }
+    return service.issue(context, false);
+  });
+  app.post<{ Querystring: Query; Body: { his: unknown } }>('/api/captcha/challenge', {
+    schema: { querystring: querySchema, body: { type: 'object', required: ['his'], additionalProperties: false, properties: { his: {} } } },
   }, async (request) => {
-    const his = parseHis(request.body.his);
-    request.log.info({
-      event: 'his_received', focusSamples: his.focus.length, pointerSamples: his.pointer.length,
-      scrollSamples: his.scroll.length, touchSamples: his.touch.length,
-    }, 'Получен снимок HIS; данные переданы клиентом');
-    return captcha.issue(request.anonymousSession, request.log, his);
+    if (!config.hisEnabled) throw new ApiError(400, 'HIS_DISABLED');
+    const context = resolveContext(config, request.query.site_id, request.query.action, request.query.policy);
+    assertOrigin(config, context, request.headers.origin);
+    parseHis(request.body.his); // Validate once and discard; do not persist or log samples.
+    return service.issue(context, true);
   });
-  app.post<{ Body: { payload?: unknown; code?: unknown } }>('/api/captcha/verify', {
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-    schema: {
-      body: {
-        type: 'object', additionalProperties: false,
-        properties: { payload: {}, code: {} },
-      },
-    },
+  app.post<{ Body: { payload: string; code?: string; fields?: Record<string, string>; timeZone?: string } }>('/api/captcha/verify', {
+    schema: { body: { type: 'object', required: ['payload'], additionalProperties: false, properties: {
+      payload: { type: 'string', minLength: 1, maxLength: 16384 },
+      code: { type: 'string', maxLength: 128 },
+      fields: { type: 'object', maxProperties: 20, additionalProperties: { type: 'string', maxLength: 2000 } },
+      timeZone: { type: 'string', maxLength: 100 },
+    } } },
   }, async (request) => {
-    try {
-      await captcha.verifyCode(request.body.payload, request.body.code, request.anonymousSession, request.log);
-      return { verified: true };
-    } catch (error) {
-      if (!(error instanceof CaptchaError)) throw error;
-      request.log.info({ event: 'verification_rejected', code: error.code }, error.message);
-      return { verified: false, reason: error.message };
-    }
+    if (request.body.code !== undefined) throw new ApiError(400, 'GRAPHICS_UNSUPPORTED');
+    // Native optional form/timeZone fields are accepted but never scored or stored.
+    return service.verify(request.body.payload, request.headers.origin);
   });
-  app.post<{ Body: { message: string; altcha?: unknown } }>('/api/demo/submit', {
-    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
-    schema: {
-      body: {
-        type: 'object',
-        required: ['message'],
-        additionalProperties: false,
-        properties: {
-          message: { type: 'string', minLength: 1, maxLength: 2000, pattern: '\\S' },
-          // Validate payload in the service so malformed/missing values get CAPTCHA codes.
-          altcha: {},
-        },
-      },
+  app.post<{ Body: { payload: string; site_id: string; action: string; policy: string } }>('/internal/captcha/validate', {
+    onRequest: async (request) => {
+      const auth = request.headers.authorization;
+      if (!auth || !/^Bearer [^\s]{32,512}$/.test(auth)) throw new ApiError(401, 'SERVICE_UNAUTHORIZED');
+      const presented = createHash('sha256').update(auth.slice(7)).digest();
+      let allowedSites: string[] | undefined;
+      for (const client of Object.values(config.clients)) {
+        if (timingSafeEqual(presented, createHash('sha256').update(client.secret).digest())) allowedSites = client.sites;
+      }
+      if (!allowedSites) throw new ApiError(401, 'SERVICE_UNAUTHORIZED');
+      serviceScopes.set(request, allowedSites);
     },
+    schema: { body: { type: 'object', required: ['payload', 'site_id', 'action', 'policy'], additionalProperties: false,
+      properties: { payload: { type: 'string', minLength: 1, maxLength: 8192 }, site_id: identifier, action: identifier, policy: identifier } } },
   }, async (request) => {
-    const his = await captcha.consume(request.body.altcha, request.anonymousSession, request.log);
-    return { success: true, message: 'CAPTCHA успешно проверена', his };
+    if (!serviceScopes.get(request)!.includes(request.body.site_id)) throw new ApiError(403, 'SERVICE_SCOPE_FORBIDDEN');
+    return service.validate(request.body.payload, { site_id: request.body.site_id, action: request.body.action, policy: request.body.policy });
   });
-  const cleanup = setInterval(() => { sessions.cleanup(); captcha.cleanup(); }, 30_000);
-  cleanup.unref();
-  app.addHook('onClose', async () => { clearInterval(cleanup); });
   return app;
 }

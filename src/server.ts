@@ -1,40 +1,22 @@
-import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { config } from 'dotenv';
+import { config as loadEnv } from 'dotenv';
 import { buildApp } from './app.js';
+import { configFromEnv } from './config.js';
+import { RedisStore } from './store.js';
 
-// Resolve from this module so dev and the compiled server load the same project-root .env.
-config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
-
-function positiveInteger(name: string, fallback: number, max: number): number {
-  const value = Number(process.env[name] ?? fallback);
-  if (!Number.isSafeInteger(value) || value <= 0 || value > max) throw new Error(`Invalid ${name}`);
-  return value;
-}
-
-const configuredSecret = process.env.HMAC_SECRET;
-const captchaMode = process.env.CAPTCHA_MODE ?? 'image';
-if (captchaMode !== 'image' && captchaMode !== 'pow') throw new Error('CAPTCHA_MODE must be image or pow');
-if (configuredSecret?.startsWith('replace-with-')) throw new Error('Generate a real HMAC_SECRET in .env');
-const app = await buildApp({
-  // An unconfigured local run still works; all challenges disappear on restart anyway.
-  hmacSecret: configuredSecret ?? randomBytes(32).toString('hex'),
-  sessionTtlSeconds: positiveInteger('SESSION_TTL_SECONDS', 3600, 86400),
-  challengeTtlSeconds: positiveInteger('CHALLENGE_TTL_SECONDS', 120, 3600),
-  powCost: positiveInteger('POW_COST', 1000, 100_000),
-  imageCaptcha: captchaMode === 'image',
-  corsOrigins: (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
-    .split(',').map((origin) => origin.trim()).filter(Boolean),
-  logger: { level: process.env.LOG_LEVEL ?? 'info' },
-});
-if (!configuredSecret) app.log.info('HMAC secret сгенерирован в памяти на время этого запуска');
-
+// Separate file: the base implementation's existing .env remains untouched.
+loadEnv({ path: fileURLToPath(new URL('../.env.native', import.meta.url)), quiet: true });
+const config = configFromEnv(process.env);
+const port = Number(process.env.PORT ?? 3001);
+if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
+const store = await RedisStore.connect(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379', process.env.REDIS_NAMESPACE);
+const app = await buildApp({ config, store, logger: { level: process.env.LOG_LEVEL ?? 'info' } });
+app.addHook('onClose', () => store.close());
 try {
-  await app.listen({ host: process.env.HOST ?? '127.0.0.1', port: positiveInteger('PORT', 3001, 65535) });
-} catch (error) {
-  app.log.error(error);
-  await app.close();
-  process.exitCode = 1;
+  await app.listen({ host: process.env.HOST ?? '127.0.0.1', port });
+} catch {
+  app.log.error({ event: 'startup_failed' }, 'Unable to listen');
+  await app.close(); process.exitCode = 1;
 }
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => { void app.close().then(() => { process.exitCode = 0; }); });

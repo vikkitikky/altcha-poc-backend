@@ -1,17 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 
-const example = new URL('../.env.example', import.meta.url);
-const target = new URL('../.env', import.meta.url);
-const contents = (await readFile(example, 'utf8')).replace(
-  'replace-with-a-random-secret-of-at-least-32-characters',
-  randomBytes(32).toString('hex'),
-);
+let contents = await readFile(new URL('../.env.native.example', import.meta.url), 'utf8');
+for (const placeholder of ['replace-challenge-secret', 'replace-token-secret', 'replace-service-secret']) {
+  contents = contents.replace(placeholder, randomBytes(32).toString('hex'));
+}
 try {
-  await writeFile(target, contents, { flag: 'wx', mode: 0o600 });
-  console.log('Создан .env со случайным HMAC_SECRET. Ключ не выводится.');
+  await writeFile(new URL('../.env.native', import.meta.url), contents, { flag: 'wx', mode: 0o600 });
+  console.log('Создан .env.native с независимыми случайными ключами. Секреты не выводятся.');
 } catch (error) {
-  if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
-    console.log('.env уже существует: настройки сохранены.');
-  } else { throw error; }
+  if (error?.code === 'EEXIST') console.log('.env.native уже существует: настройки сохранены.');
+  else throw error;
 }
