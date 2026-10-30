@@ -5,6 +5,7 @@ import { assertOrigin, idPattern, resolveContext, validateConfig, type CaptchaCo
 import { ApiError } from './errors.js';
 import { HisError, parseHis } from './his.js';
 import { CaptchaService } from './service.js';
+import { CanvasImageGenerator, type ImageGenerator } from './image.js';
 import { RedisStore } from './store.js';
 
 export interface AppOptions {
@@ -12,6 +13,7 @@ export interface AppOptions {
   store: RedisStore;
   logger?: boolean | { level: string };
   rateLimit?: number;
+  imageGenerator?: ImageGenerator;
 }
 const identifier = { type: 'string', pattern: idPattern.source, maxLength: 100 };
 const querySchema = { type: 'object', required: ['site_id'], additionalProperties: false,
@@ -24,7 +26,7 @@ export async function buildApp(options: AppOptions) {
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false, allErrors: false } },
     logController: new LogController({ disableRequestLogging: true }),
     requestTimeout: 10000, connectionTimeout: 10000 });
-  const service = new CaptchaService(config, options.store);
+  const service = new CaptchaService(config, options.store, options.imageGenerator ?? new CanvasImageGenerator());
   // Attach authorization scopes without exposing credentials on request/logs.
   const serviceScopes = new WeakMap<object, string[]>();
   const origins = [...new Set(Object.values(config.sites).flatMap((site) => site.origins))];
@@ -74,9 +76,8 @@ export async function buildApp(options: AppOptions) {
       timeZone: { type: 'string', maxLength: 100 },
     } } },
   }, async (request) => {
-    if (request.body.code !== undefined) throw new ApiError(400, 'GRAPHICS_UNSUPPORTED');
     // Native optional form/timeZone fields are accepted but never scored or stored.
-    return service.verify(request.body.payload, request.headers.origin);
+    return service.verify(request.body.payload, request.headers.origin, request.body.code, createHash('sha256').update(request.ip).digest('hex'));
   });
   app.post<{ Body: { payload: string; site_id: string; action: string; policy: string } }>('/internal/captcha/validate', {
     onRequest: async (request) => {

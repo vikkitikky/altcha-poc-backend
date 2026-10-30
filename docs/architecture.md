@@ -17,12 +17,15 @@ sequenceDiagram
       Note over C: Проверить структуру, отбросить снимок
     end
     C->>R: Выданный challenge + контекст, TTL
-    C-->>F: {parameters, signature}
+    C-->>F: {parameters, signature, optional codeChallenge}
     Note over F: Нативный worker решает PoW
-    F->>C: POST verify {payload: original PoW}
+    opt pow+image
+      Note over F: Встроенный Code UI, пользователь вводит символы
+    end
+    F->>C: POST verify {payload: original PoW, optional code}
     C->>R: Получить исходный challenge
-    Note over C: Политика, подпись, TTL, verifySolution
-    C->>R: Атомарно pow-used + token permit
+    Note over C: Политика, подпись, TTL, verifySolution + image answer
+    C->>R: Атомарно image state + pow-used + token permit
     C-->>F: {verified:true,payload:JWT}
     Note over F: Виджет заменяет payload в hidden input
     F->>B: Бизнес-запрос с серверным payload
@@ -42,6 +45,7 @@ sequenceDiagram
 | `src/service.ts` | `altcha-lib@2.8.0`: createChallenge/verifySolution + PBKDF2 из node:crypto; `jose@6.2.14`: HS256 JWT |
 | `src/store.ts` | `redis@6.3.1`: issued challenges, отдельное PoW-состояние, token permits, shared rate limit |
 | `src/app.ts` | `fastify@5.12.7`, `@fastify/cors@11.3.1`: HTTP API, schema validation, CORS, auth, безопасные ошибки |
+| `src/image.ts`, `image-worker.mjs` | `@napi-rs/canvas@1.1.0` (MIT), ограниченные workers, PNG; Roboto Mono (OFL) из assets |
 | `src/his.ts` | Строгий парсер опубликованной структуры collector 3.5.0 |
 | `src/server.ts` | `dotenv@18.0.8`, явная конфигурация, запуск/остановка |
 | `examples/` | Отдельный Business MS, статический frontend и настоящий `altcha@3.5.0` |
@@ -69,7 +73,7 @@ sequenceDiagram
 
 Клиент не может понизить политику query-параметром. Challenge и JWT подписывают site/action/policy и SHA-256 ревизии параметров политики (`cost`, counter bounds, TTLs, graphics). Изменение профиля под прежним именем делает старые challenge/tokens непригодными. Конфигурация фиксирована на время процесса; для обновления нужен согласованный перезапуск реплик.
 
-`graphics:true` зарезервирован как серверная возможность, но останавливает запуск с `GRAPHICS_UNSUPPORTED`. Он не включает несуществующую проверку. Для разработки графического backend нужен отдельный архитектурный выбор.
+Серверный `Policy.mode` принимает `pow` (default) или `pow+image`. `CAPTCHA_IMAGE_ENABLED=true` разрешает image-функцию и в default-политиках переводит только strict в `pow+image`. В custom POLICIES_JSON режим задаётся явно; image-policy при выключенном флаге прекращает запуск, а не понижает защиту. Старый зарезервированный `graphics:true` отвергается с указанием использовать mode. Полное описание — `image-captcha.md`.
 
 Сервер не выдаёт `configuration` и `X-Altcha-Config`; allowlist таких переопределений в этой реализации **пустой**. Входные query/body не могут повлиять на `fetch`, verify URL или другие настройки виджета.
 
@@ -80,13 +84,15 @@ sequenceDiagram
 | Ключ | Содержимое | Срок хранения |
 | --- | --- | --- |
 | `challenge:<uuid>` | Исходный challenge, контекст, `hisReceived` | До expiresAt, по умолчанию 120 s |
+| `image:<challenge uuid>` | Hash: случайный image ID, HMAC эталона, pending/failed/completed, attempts=0/1 | Общий TTL PoW/image |
+| `rate:image-guess:<sha256(ip)>` | Первые ответы по разным image challenge, не вводы одного изображения | 60 s |
 | `pow-used:<uuid>` | Маркер `1` | Остаток TTL исходного challenge |
 | `token:<jti>` | SHA-256 полного подписанного токена | До JWT exp, по умолчанию 60 s |
 | `rate:<sha256(ip)>` | Счётчик запросов | 60 s от первого запроса |
 
 Префикс: `captcha:{native-v1}:`. Значения challenge не содержат решение, снимок HIS или клиентские form fields. Redis не хранит raw JWT. PoW и token имеют независимые идентификаторы и состояния.
 
-После проверки PoW JWT сначала подписывается в памяти. Один Lua-вызов проверяет существование/остаточный TTL challenge и отсутствие `pow-used`, записывает `pow-used` и разрешение для нового `jti`. Конкуренты получают только один выданный токен. Внутренняя проверка другим Lua-вызовом сравнивает hash и удаляет permit. Подпись без permit не даёт успеха.
+После проверки PoW JWT сначала подписывается в памяти (не выдаётся и не имеет permit). При image-mode Lua сначала проверяет image ID/TTL/pending, общую image-квоту и HMAC кандидата. Неверный ответ атомарно закрывает только image с attempts=1; отсутствующий/некорректный code вообще не попадает в эту операцию. Полный успех атомарно завершает image и PoW. Подробности и причины отказа — `../ALTCHA_CODE_RETRY_BEHAVIOR.md`. Один Lua-вызов проверяет существование/остаточный TTL challenge и отсутствие `pow-used`, записывает `pow-used` и разрешение для нового `jti`. Конкуренты получают только один выданный токен. Внутренняя проверка другим Lua-вызовом сравнивает hash и удаляет permit. Подпись без permit не даёт успеха.
 
 При недоступности Redis, исчерпании памяти, таймауте команды, истечении TTL или потере состояния сервис отказывает. Нет fallback в Map, пропуска ошибок или успешного ответа по одной подписи. Команды ограничены 2 s; offline queue выключена. Клиент намеренно не переподключается автоматически: после разрыва сервис остаётся fail-closed до supervised restart.
 
@@ -114,7 +120,7 @@ Raw HIS живёт только в памяти обработки одного 
 ## Ограничения и оставшиеся решения
 
 1. Только modern PBKDF2/SHA-256; legacy PoW v1, Argon2/Scrypt и протокол Sentinel server-signature не включены. JWT — контракт собственного CAPTCHA MS, принимаемый виджетом как opaque payload.
-2. Нет генерации графики/аудио, visual puzzle, HIS-аналитики, threat intelligence или адаптивного risk scoring. Наличие HIS не доказывает человечность.
+2. Генерируется image-код; аудио, object puzzles, HIS-аналитики, threat intelligence и адаптивного risk scoring нет. Наличие HIS не доказывает человечность.
 3. CAPTCHA не является аутентификацией/авторизацией пользователя и не привязывает payload к конкретному browser/session или содержимому формы. Привязка — site/action/policy. Для business fields binding потребуется отдельное решение.
 4. Погашение токена и бизнес-транзакция не атомарны друг с другом. Если Business MS упал после validate, токен уже использован; нужна собственная идемпотентность/транзакционная модель Business MS. Не заявляется exactly-once бизнес-операция.
 5. TLS/mTLS, HA/durability/failover fencing Redis, ingress ACL, secret manager, метрики без payload и нагрузочное тестирование должны быть определены при deployment.
@@ -131,7 +137,7 @@ Raw HIS живёт только в памяти обработки одного 
 | Состояние | Maps процесса | Redis TTL/Lua, гонки между репликами проверяются |
 | Контекст | Экспериментальный контракт | Server site/action policy map, signed revision, internal expected context |
 | Keys/auth | Один HMAC secret, mock-вызовы | Независимые key rings, service auth/scopes, HTTP Business MS |
-| Graphics | Собственная canvas CAPTCHA | Удалена из альтернативного решения; библиотечный предел явно описан |
+| Graphics | Исходная собственная canvas CAPTCHA | Новый ограниченный worker-генератор и image lifecycle согласованы с native Code UI; opt-in server policy |
 | HIS | Сбор и серверный разбор | Опциональный нативный handshake, строгая структура, отсутствие анализа зафиксировано |
 | Окружение | .env | Отдельный .env.native; прежний файл сохранён |
 | Тесты | Серверный PoC, браузер в соседнем frontend | Самостоятельные Redis/API и real-widget browser harness в этом репозитории |

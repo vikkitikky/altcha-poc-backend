@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { RedisStore } from '../../src/store.js';
 import { buildApp } from '../../src/app.js';
+import type { ImageGenerator } from '../../src/image.js';
 import { type CaptchaConfig } from '../../src/config.js';
 
 export function testConfig(hisEnabled = false): CaptchaConfig {
@@ -61,8 +62,8 @@ export async function startRedis() {
     throw new Error(`Redis startup timeout: ${output}`);
   } catch (error) { await stop(); throw error; }
 }
-export async function fixture(url: string, config = testConfig(), namespace = randomUUID(), rateLimit = 10000) {
+export async function fixture(url: string, config = testConfig(), namespace = randomUUID(), rateLimit = 10000, imageGenerator?: ImageGenerator) {
   const store = await RedisStore.connect(url, namespace);
-  const app = await buildApp({ config, store, rateLimit });
+  const app = await buildApp({ config, store, rateLimit, imageGenerator });
   return { app, store, config, namespace, close: async () => { await app.close(); await store.close(); } };
 }

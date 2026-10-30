@@ -1,10 +1,11 @@
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomInt, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createChallenge, verifySolution, type Challenge, type Solution } from 'altcha-lib';
 import { deriveKey } from 'altcha-lib/algorithms/pbkdf2';
 import { SignJWT, jwtVerify } from 'jose';
-import { assertOrigin, resolveContext, type CaptchaConfig, type Context } from './config.js';
+import { assertOrigin, resolveContext, captchaMode, imageSettings, type CaptchaConfig, type Context } from './config.js';
 import { ApiError } from './errors.js';
+import { CanvasImageGenerator, imageAlphabet, type ImageGenerator } from './image.js';
 import { RedisStore } from './store.js';
 
 const issuer = 'captcha-ms';
@@ -12,7 +13,7 @@ const audience = 'business-ms';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const keyBytes = (secret: string) => new TextEncoder().encode(secret);
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-interface ChallengeRecord { challenge: Challenge; context: Context; hisReceived: boolean }
+interface ChallengeRecord { challenge: Challenge; context: Context; hisReceived: boolean; imageId?: string }
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -36,28 +37,50 @@ function decodePayload(payload: string): { challenge: Challenge; solution: Solut
 }
 export function policyRevision(config: CaptchaConfig, context: Context): string {
   const policy = config.policies[context.policy]!;
-  return createHash('sha256').update(JSON.stringify([policy.cost, policy.counterMin, policy.counterMax, policy.challengeTtl, policy.tokenTtl, !!policy.graphics])).digest('hex');
+  const base: unknown[] = [policy.cost, policy.counterMin, policy.counterMax, policy.challengeTtl, policy.tokenTtl, !!policy.graphics];
+  if (captchaMode(policy) === 'pow+image') { const image = imageSettings(config); base.push('pow+image', image.length, image.ttl); }
+  return createHash('sha256').update(JSON.stringify(base)).digest('hex');
+}
+function imageDigest(secret: string, imageId: string, answer: string) {
+  return createHmac('sha256', secret).update(`altcha-image-v1\0${imageId}\0${answer}`).digest('hex');
 }
 export class CaptchaService {
-  constructor(private readonly config: CaptchaConfig, private readonly store: RedisStore) {}
+  constructor(private readonly config: CaptchaConfig, private readonly store: RedisStore,
+    private readonly images: ImageGenerator = new CanvasImageGenerator()) {}
   async issue(context: Context, hisReceived: boolean): Promise<Challenge> {
     if (this.config.hisEnabled && !hisReceived) throw new ApiError(400, 'HIS_MISSING');
     const policy = this.config.policies[context.policy]!;
     const id = randomUUID();
     const kid = this.config.challengeKeys.active;
-    const expires = Math.floor(Date.now() / 1000) + policy.challengeTtl;
+    const settings = imageSettings(this.config);
+    const image = captchaMode(policy) === 'pow+image' ? await this.images.generate(settings.length) : undefined;
+    const imageId = image ? randomUUID() : undefined;
+    const expires = Math.floor(Date.now() / 1000) + (image ? Math.min(policy.challengeTtl, settings.ttl) : policy.challengeTtl);
     const challenge = await createChallenge({
       algorithm: 'PBKDF2/SHA-256', cost: policy.cost,
       counter: randomInt(policy.counterMin, policy.counterMax + 1), deriveKey,
       hmacSignatureSecret: this.config.challengeKeys.keys[kid]!, expiresAt: expires,
-      data: { challenge_id: id, kid, ...context, policy_revision: policyRevision(this.config, context), his_received: hisReceived },
+      data: { challenge_id: id, kid, ...context, policy_revision: policyRevision(this.config, context), his_received: hisReceived,
+        ...(image ? { captcha_mode: 'pow+image', image_id: imageId! } : {}) },
     });
-    // JSON roundtrip removes undefined optional parameters exactly as HTTP does.
-    await this.store.putChallenge(id, JSON.stringify({ challenge, context, hisReceived } satisfies ChallengeRecord), expires);
-    return challenge;
+    // The widget includes only parameters/signature in its PoW payload, never codeChallenge.
+    await this.store.putChallenge(id, JSON.stringify({ challenge, context, hisReceived, imageId } satisfies ChallengeRecord), expires,
+      image ? { id: imageId!, digest: imageDigest(this.config.challengeKeys.keys[kid]!, imageId!, image.answer) } : undefined);
+    return image ? { ...challenge, codeChallenge: { image: `data:image/png;base64,${Buffer.from(image.png).toString('base64')}`, length: settings.length } } : challenge;
   }
-  async verify(rawPayload: string, origin?: string) {
+  async verify(rawPayload: string, origin?: string, code?: string, clientKey = 'direct') {
     const submitted = decodePayload(rawPayload);
+    try { return await this.verifyDecoded(submitted, origin, code, clientKey); }
+    catch (error) {
+      // Expected image refusals must complete the native code-submission promise.
+      // HTTP errors in Widget 3.5.0's Code path otherwise strand it in verifying.
+      if (submitted.challenge.parameters.data!.captcha_mode === 'pow+image' && error instanceof ApiError && error.status < 500) {
+        return { verified: false as const, reason: error.code };
+      }
+      throw error;
+    }
+  }
+  private async verifyDecoded(submitted: { challenge: Challenge; solution: Solution }, origin: string | undefined, code: string | undefined, clientKey: string) {
     const id = String(submitted.challenge.parameters.data!.challenge_id);
     const stored = await this.store.getChallenge(id);
     if (!stored) throw new ApiError(400, 'CHALLENGE_NOT_USABLE');
@@ -66,6 +89,7 @@ export class CaptchaService {
     const context = resolveContext(this.config, record.context.site_id, record.context.action, record.context.policy);
     assertOrigin(this.config, context, origin);
     const policy = this.config.policies[context.policy]!;
+    const mode = captchaMode(policy);
     if (record.challenge.parameters.cost !== policy.cost
       || record.challenge.parameters.data!.policy_revision !== policyRevision(this.config, context)
       || (this.config.hisEnabled && !record.hisReceived)) throw new ApiError(400, 'POLICY_MISMATCH');
@@ -75,16 +99,29 @@ export class CaptchaService {
     if (record.challenge.parameters.expiresAt! <= Date.now() / 1000) throw new ApiError(400, 'CHALLENGE_EXPIRED');
     const result = await verifySolution({ challenge: record.challenge, solution: submitted.solution, deriveKey, hmacSignatureSecret: secret });
     if (!result.verified) throw new ApiError(400, 'POW_INVALID');
+    let imageAttempt: { id: string; digest: string; rateKey: string; limit: number } | undefined;
+    if (mode === 'pow+image') {
+      if (code === undefined || code.trim() === '') throw new ApiError(400, 'IMAGE_CODE_REQUIRED');
+      const normalized = code.trim().toUpperCase();
+      const settings = imageSettings(this.config);
+      if (normalized.length !== settings.length || [...normalized].some(c => !imageAlphabet.includes(c))) throw new ApiError(400, 'IMAGE_CODE_INVALID');
+      if (!record.imageId || record.challenge.parameters.data!.image_id !== record.imageId) throw new ApiError(400, 'IMAGE_NOT_USABLE');
+      imageAttempt = { id: record.imageId, digest: imageDigest(secret, record.imageId, normalized), rateKey: clientKey, limit: settings.rateLimit };
+    } else if (code !== undefined) throw new ApiError(400, 'CODE_UNEXPECTED');
     const now = Math.floor(Date.now() / 1000);
     const expires = now + policy.tokenTtl;
     const tokenId = randomUUID();
     const tokenKid = this.config.tokenKeys.active;
-    const token = await new SignJWT({ ...context, policy_revision: policyRevision(this.config, context), his_received: record.hisReceived, v: 1 })
+    const token = await new SignJWT({ ...context, policy_revision: policyRevision(this.config, context), his_received: record.hisReceived, v: 1,
+      ...(imageAttempt ? { captcha_mode: mode, image_id: record.imageId, image_verified: true } : {}) })
       .setProtectedHeader({ alg: 'HS256', kid: tokenKid, typ: 'JWT' })
       .setIssuer(issuer).setAudience(audience).setJti(tokenId).setIssuedAt(now).setExpirationTime(expires)
       .sign(keyBytes(this.config.tokenKeys.keys[tokenKid]!));
-    const claimed = await this.store.completePow(id, tokenId, tokenHash(token), expires);
-    if (claimed !== 1) throw new ApiError(400, claimed === 0 ? 'POW_REPLAYED' : 'CHALLENGE_EXPIRED');
+    const claimed = await this.store.completePow(id, tokenId, tokenHash(token), expires, imageAttempt);
+    if (claimed !== 1) {
+      const reasons: Record<number, string> = { 0: 'POW_REPLAYED', [-1]: 'CHALLENGE_EXPIRED', [-2]: 'IMAGE_NOT_USABLE', [-3]: 'IMAGE_ALREADY_ATTEMPTED', [-4]: 'IMAGE_RATE_LIMITED', [-5]: 'IMAGE_INCORRECT' };
+      throw new ApiError(400, reasons[claimed] ?? 'IMAGE_NOT_USABLE');
+    }
     return { verified: true as const, payload: token };
   }
   async validate(token: string, expected: Context) {
@@ -107,6 +144,8 @@ export class CaptchaService {
     }
     resolveContext(this.config, expected.site_id, expected.action, expected.policy);
     if (claims.policy_revision !== policyRevision(this.config, expected)) throw new ApiError(400, 'POLICY_MISMATCH');
+    const mode = captchaMode(this.config.policies[expected.policy]!);
+    if ((claims.captcha_mode ?? 'pow') !== mode || (mode === 'pow+image' && (claims.image_verified !== true || typeof claims.image_id !== 'string' || !uuid.test(claims.image_id)))) throw new ApiError(400, 'POLICY_MISMATCH');
     if (this.config.hisEnabled && !claims.his_received) throw new ApiError(400, 'POLICY_MISMATCH');
     if (!await this.store.consumeToken(claims.jti!, tokenHash(token))) throw new ApiError(400, 'TOKEN_NOT_USABLE');
     return { valid: true as const, ...expected };

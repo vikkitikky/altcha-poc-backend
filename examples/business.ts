@@ -42,7 +42,7 @@ export async function buildBusinessApp(options: BusinessOptions) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   loadEnv({ path: new URL('../.env.native', import.meta.url), quiet: true });
   const config = configFromEnv(process.env);
-  const context = resolveContext(config, 'example', 'submit_form');
+  const context = resolveContext(config, 'example', process.env.DEMO_CAPTCHA_ACTION ?? 'submit_form');
   const app = await buildBusinessApp({ captchaOrigin: process.env.CAPTCHA_ORIGIN ?? 'http://127.0.0.1:3001',
     serviceSecret: config.clients.business!.secret, siteId: context.site_id, action: context.action, policy: context.policy,
     origins: config.sites.example!.origins });

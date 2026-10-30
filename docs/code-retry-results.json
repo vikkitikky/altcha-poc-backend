@@ -1,0 +1,127 @@
+{
+  "widget": "3.5.0",
+  "results": [
+    {
+      "name": "401",
+      "passed": true,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "observed": {
+        "after": "verifying",
+        "states": [
+          "verifying",
+          "code",
+          "verifying"
+        ],
+        "events": [
+          "statechange",
+          "statechange",
+          "codechallenge",
+          "statechange"
+        ],
+        "unhandledRejections": 1,
+        "samePowRetained": true,
+        "automaticChallengeFetch": false,
+        "transportRequests": 1
+      }
+    },
+    {
+      "name": "400",
+      "passed": true,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "observed": {
+        "after": "verifying",
+        "states": [
+          "verifying",
+          "code",
+          "verifying"
+        ],
+        "events": [
+          "statechange",
+          "statechange",
+          "codechallenge",
+          "statechange"
+        ],
+        "unhandledRejections": 1,
+        "samePowRetained": true,
+        "automaticChallengeFetch": false,
+        "transportRequests": 1
+      }
+    },
+    {
+      "name": "false",
+      "passed": true,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "observed": {
+        "after": "error",
+        "states": [
+          "verifying",
+          "code",
+          "verifying",
+          "error",
+          "verifying",
+          "code"
+        ],
+        "events": [
+          "statechange",
+          "statechange",
+          "codechallenge",
+          "statechange",
+          "statechange",
+          "statechange",
+          "statechange",
+          "codechallenge"
+        ],
+        "unhandledRejections": 0,
+        "samePowRetained": true,
+        "automaticChallengeFetch": false,
+        "transportRequests": 1
+      }
+    },
+    {
+      "name": "422",
+      "passed": true,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "observed": {
+        "after": "verifying",
+        "states": [
+          "verifying",
+          "code",
+          "verifying"
+        ],
+        "events": [
+          "statechange",
+          "statechange",
+          "codechallenge",
+          "statechange"
+        ],
+        "unhandledRejections": 1,
+        "samePowRetained": true,
+        "automaticChallengeFetch": false,
+        "transportRequests": 1
+      }
+    },
+    {
+      "name": "network",
+      "passed": true,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+      "observed": {
+        "after": "verifying",
+        "states": [
+          "verifying",
+          "code",
+          "verifying"
+        ],
+        "events": [
+          "statechange",
+          "statechange",
+          "codechallenge",
+          "statechange"
+        ],
+        "unhandledRejections": 1,
+        "samePowRetained": true,
+        "automaticChallengeFetch": false,
+        "transportRequests": 3
+      }
+    }
+  ]
+}

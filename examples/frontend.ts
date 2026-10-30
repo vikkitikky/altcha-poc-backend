@@ -7,7 +7,7 @@ const widget = await readFile(fileURLToPath(import.meta.resolve('altcha')));
 const server = createServer((request, response) => {
   response.setHeader('Cache-Control', 'no-store');
   response.setHeader('X-Content-Type-Options', 'nosniff');
-  if (request.method === 'GET' && request.url === '/') {
+  if (request.method === 'GET' && new URL(request.url ?? '/', 'http://127.0.0.1:3000').pathname === '/') {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html);
   } else if (request.method === 'GET' && request.url === '/widget.js') {
     response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); response.end(widget);

@@ -146,11 +146,11 @@ test('even a correctly signed but unissued token has no Redis permit', async () 
 }));
 
 test('challenge and verification-token TTL enforced by Redis and JWT', async () => {
-  const config = testConfig(); config.policies.standard!.challengeTtl = 1; config.policies.standard!.tokenTtl = 1;
+  const config = testConfig(); config.policies.standard!.challengeTtl = 2; config.policies.standard!.tokenTtl = 2;
   await isolated(async (f) => {
     const pow = await solve(await issue(f));
     const payload = await token(f);
-    await delay(1100);
+    await delay(2100);
     assert.equal((await verify(f, pow)).json().error, 'CHALLENGE_NOT_USABLE');
     assert.equal((await validate(f, payload)).json().error, 'TOKEN_INVALID');
   }, config);
@@ -249,11 +249,11 @@ test('Redis permits survive app restart; consumed tokens remain consumed', async
   } finally { await second.close(); }
 }));
 
-test('body size, extra verification fields and unsupported graphics are explicit errors', async () => isolated(async (f) => {
+test('body size, extra verification fields and unexpected code in pow mode are explicit errors', async () => isolated(async (f) => {
   assert.equal((await f.app.inject({ method: 'POST', url: '/api/captcha/verify', payload: { payload: 'x'.repeat(40000) } })).statusCode, 413);
   assert.equal((await f.app.inject({ method: 'POST', url: '/api/captcha/verify', payload: { payload: 'x', his: hisSnapshot() } })).statusCode, 400);
-  assert.equal((await f.app.inject({ method: 'POST', url: '/api/captcha/verify', payload: { payload: 'x', code: '1234' } })).json().error, 'GRAPHICS_UNSUPPORTED');
   const pow = await solve(await issue(f));
+  assert.equal((await f.app.inject({ method: 'POST', url: '/api/captcha/verify', payload: { payload: pow, code: '1234' } })).json().error, 'CODE_UNEXPECTED');
   assert.equal((await f.app.inject({ method: 'POST', url: '/api/captcha/verify', payload: { payload: pow, fields: { message: 'native optional field' }, timeZone: 'Europe/Moscow' } })).statusCode, 200);
 }));
 

@@ -1,7 +1,13 @@
 import { ApiError } from './errors.js';
 
 export interface KeyRing { active: string; keys: Record<string, string> }
+export type CaptchaMode = 'pow' | 'pow+image';
+export interface ImageSettings { enabled: boolean; length: number; ttl: number; rateLimit: number }
+export const defaultImageSettings: ImageSettings = { enabled: false, length: 5, ttl: 120, rateLimit: 10 };
+export const imageSettings = (config: CaptchaConfig): ImageSettings => ({ ...defaultImageSettings, ...config.image });
+export const captchaMode = (policy: Policy): CaptchaMode => policy.mode ?? 'pow';
 export interface Policy {
+  mode?: CaptchaMode;
   cost: number;
   counterMin: number;
   counterMax: number;
@@ -22,6 +28,7 @@ export interface CaptchaConfig {
   policies: Record<string, Policy>;
   clients: Record<string, ServiceClient>;
   hisEnabled: boolean;
+  image?: ImageSettings;
 }
 export interface Context { site_id: string; action: string; policy: string }
 export const idPattern = /^[a-zA-Z0-9_.:-]{1,100}$/;
@@ -42,6 +49,11 @@ export function assertOrigin(config: CaptchaConfig, context: Context, origin?: s
   if (origin && !config.sites[context.site_id]!.origins.includes(origin)) throw new ApiError(403, 'ORIGIN_FORBIDDEN');
 }
 export function validateConfig(config: CaptchaConfig): void {
+  const image = imageSettings(config);
+  if (typeof image.enabled !== 'boolean') throw new Error('Invalid image enabled flag');
+  for (const [value,min,max] of [[image.length,4,8],[image.ttl,1,600],[image.rateLimit,1,120]] as const) {
+    if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error('Invalid image settings');
+  }
   for (const ring of [config.challengeKeys, config.tokenKeys]) {
     if (!idPattern.test(ring.active) || !Object.hasOwn(ring.keys, ring.active)) throw new Error('Invalid active key');
     for (const [id, secret] of Object.entries(ring.keys)) {
@@ -55,7 +67,9 @@ export function validateConfig(config: CaptchaConfig): void {
   if (!Object.keys(config.sites).length || !Object.keys(config.clients).length) throw new Error('Configure sites and service clients');
   for (const [name, policy] of Object.entries(config.policies)) {
     if (!idPattern.test(name)) throw new Error('Invalid policy name');
-    if (policy.graphics) throw new Error('GRAPHICS_UNSUPPORTED: altcha-lib has no graphic challenge generator/verifier');
+    if (policy.graphics) throw new Error('Use policy.mode=pow+image instead of the legacy graphics flag');
+    if (!['pow','pow+image'].includes(captchaMode(policy))) throw new Error('Invalid CAPTCHA mode');
+    if (captchaMode(policy) === 'pow+image' && !image.enabled) throw new Error('Image policy requires CAPTCHA_IMAGE_ENABLED=true');
     const bounds: Array<[number, number, number]> = [
       [policy.cost, 1, 100000], [policy.counterMin, 1, 100000], [policy.counterMax, policy.counterMin, 100000],
       [policy.challengeTtl, 1, 600], [policy.tokenTtl, 1, 120],
@@ -90,10 +104,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CaptchaConfig {
     return JSON.parse(value) as T;
   }
   if (env.HIS_ENABLED !== undefined && !['true', 'false'].includes(env.HIS_ENABLED)) throw new Error('HIS_ENABLED must be true or false');
+  if (env.CAPTCHA_IMAGE_ENABLED !== undefined && !['true','false'].includes(env.CAPTCHA_IMAGE_ENABLED)) throw new Error('CAPTCHA_IMAGE_ENABLED must be true or false');
+  if (env.CAPTCHA_IMAGE_MAX_ATTEMPTS !== undefined) throw new Error('CAPTCHA_IMAGE_MAX_ATTEMPTS is inapplicable: one submitted answer per image; use CAPTCHA_IMAGE_RATE_LIMIT per IP/minute');
+  const imageEnabled = env.CAPTCHA_IMAGE_ENABLED === 'true';
   const config: CaptchaConfig = {
     challengeKeys: json('CHALLENGE_KEYS_JSON'), tokenKeys: json('TOKEN_KEYS_JSON'),
     clients: json('INTERNAL_CLIENTS_JSON'), sites: json('SITES_JSON'),
-    policies: json('POLICIES_JSON', defaultPolicies), hisEnabled: env.HIS_ENABLED === 'true',
+    policies: json('POLICIES_JSON', imageEnabled ? { ...defaultPolicies, strict: { ...defaultPolicies.strict!, mode: 'pow+image' } } : defaultPolicies),
+    hisEnabled: env.HIS_ENABLED === 'true',
+    image: { enabled: imageEnabled, length: Number(env.CAPTCHA_IMAGE_LENGTH ?? 5), ttl: Number(env.CAPTCHA_IMAGE_TTL_SECONDS ?? 120), rateLimit: Number(env.CAPTCHA_IMAGE_RATE_LIMIT ?? 10) },
   };
   validateConfig(config);
   return config;

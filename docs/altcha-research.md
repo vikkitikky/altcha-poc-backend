@@ -45,27 +45,17 @@
 
 ## Отдельный вывод: графические задания
 
-**Виджет умеет показывать code challenge, но бесплатная altcha-lib не создаёт и не проверяет его.** Готовый полный сценарий на одной библиотеке отсутствует. Поэтому собственная графическая CAPTCHA в этой ветке не разрабатывается.
+Бесплатная altcha-lib по-прежнему не предоставляет генерацию изображений или проверку code. Widget 3.5.0 нативно предоставляет UI ввода символов из `codeChallenge.image`, optional `audio` и `length`, отправку `{payload,code}` на verifyUrl и последовательность PoW → Code. Тип не содержит произвольного текста задания: используются строки локализации `enterCodeFromImage`/`verificationRequired`. Нет универсального tile/object-selection/puzzle протокола.
 
-Поддержка отображения в Widget 3.5.0 подтверждена исполняемым кодом UI и типами:
+После отдельного разрешения разработать недостающий backend в этой ветке добавлен **собственный** генератор на `@napi-rs/canvas@1.1.0` (MIT), проверка HMAC эталона и атомарный lifecycle Redis. Это функциональность нашего сервиса, не altcha-lib или Sentinel. Подробности — `image-captcha.md`.
 
-```ts
-codeChallenge: {
-  image: string;
-  audio?: string;
-  length?: number;
-}
-```
+Нативный `CodeChallenge` имеет `{image:string,audio?:string,length?:number}`. Image/audio могут быть URL или data URL; наш сервис отдаёт только raster PNG data URI. Штатный текст задания берётся из локализации виджета. PoW payload не включает `codeChallenge`, поэтому image ID и mode связаны подписанными parameters.data и отдельной server-side записью.
 
-`image` — источник для `<img>`: URL/relative URL или data URL; `audio` — аналогичный источник для встроенного `<audio>`. Поле `length` задаёт длину текстового ответа. Это ввод кода из изображения/аудио, не универсальный протокол puzzle, tile selection или распознавания объектов.
+Фактический отказ отличается по путям: 200 verified:false даёт error и возможность нового задания по нативному checkbox; thrown HTTP/network error в Code callback оставляет verifying. Подтверждённые строки, runtime-матрица и выбранная одноразовая image-попытка — `../ALTCHA_CODE_RETRY_BEHAVIOR.md`. Виджет и его транспорт не изменены.
 
-Путь обработки в `Widget.svelte`: сначала вычисляется PoW payload; при наличии `challenge.codeChallenge` виджет переходит в состояние `code`, показывает встроенный ввод, а затем отправляет POST на verifyUrl с `{payload,code}` (и опциональными fields/timeZone). `codeChallenge` не включается внутрь PoW payload: туда попадают только `parameters` и `signature`. Поэтому hypothetical графический backend обязан хранить/криптографически связывать ожидаемый ответ с подписанным challenge ID и проверять его самостоятельно; доверять одному объекту UI нельзя.
+Аудио UI есть в свободном виджете, но библиотечного TTS/генератора нет. В первой версии нашего сервиса аудио отсутствует; наличие штатного audio-поля не объявляется доступной альтернативой, пока ресурс не реализован. Для требований доступности можно заранее выбрать серверную PoW-политику для соответствующей операции либо отдельно спроектировать доступный канал. Автоматического downgrade image-политики со стороны клиента нет.
 
-PoW и code challenge на frontend сочетаются штатно. Но серверу дополнительно нужны генератор изображения/аудио, защищённое хранение ожидаемого ответа, выдача ресурсов, контроль попыток и полноценная доступность. Это можно получить от Sentinel либо разработать отдельным решением; установка MIT-библиотеки сама по себе этого не добавляет. [README виджета, Code Challenges](https://github.com/altcha-org/altcha/blob/f9217276fe9d6dc879b005d37f1d96155f4ab9e1/README.md), [Sentinel Adaptive Captcha](https://altcha.org/docs/sentinel/features/adaptive-captcha/).
-
-В новой ветке `graphics:true` в серверной политике отвергается при старте, а `code` на verification API даёт `GRAPHICS_UNSUPPORTED`. Позитивные графические тесты не подменены фиктивными success-ответами. Исходный canvas-генератор из main исключён именно потому, что это собственная реализация CAPTCHA, выходящая за выбранное решение.
-
-Это не утверждение, что графические CAPTCHA вообще невозможно написать бесплатно: технически можно написать свой генератор/проверку, но в задаче такой выбор требует отдельного архитектурного решения. Sentinel — отдельный компонент со своей моделью лицензирования/доступа, его нельзя считать частью MIT altcha-lib. [Разделение open source и paid](https://altcha.org/docs/open-source-vs-paid/).
+Первоисточники: [Code.svelte 3.5.0](https://github.com/altcha-org/altcha/blob/f9217276fe9d6dc879b005d37f1d96155f4ab9e1/src/components/Code.svelte), [типы виджета](https://github.com/altcha-org/altcha/blob/f9217276fe9d6dc879b005d37f1d96155f4ab9e1/src/types/index.ts#L230-L234), [Canvas](https://github.com/Brooooooklyn/canvas), [Sentinel Adaptive Captcha](https://altcha.org/docs/sentinel/features/adaptive-captcha/). Sentinel — отдельный продукт, для этой реализации не нужен.
 
 ## Отдельный вывод: Human Interaction Signature
 

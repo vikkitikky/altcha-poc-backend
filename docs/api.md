@@ -10,7 +10,7 @@ Query: обязательный `site_id`, необязательные `action`
 GET /api/captcha/challenge?site_id=example&action=submit_form
 ```
 
-При `HIS_ENABLED=false` ответ 200 — непосредственно результат `altcha-lib.createChallenge()`:
+При `HIS_ENABLED=false` и PoW-политике ответ 200 — непосредственно результат `altcha-lib.createChallenge()`:
 
 ```json
 {
@@ -43,6 +43,18 @@ GET /api/captcha/challenge?site_id=example&action=submit_form
 ```json
 {"his":{"url":"/api/captcha/challenge?site_id=example&action=submit_form&policy=standard"}}
 ```
+
+При политике `mode: "pow+image"` добавляется штатное поле в корень ответа:
+
+```json
+{
+  "parameters": { "...": "modern PoW parameters", "data": { "captcha_mode": "pow+image", "image_id": "<uuid>", "...": "signed context" } },
+  "signature": "<signature>",
+  "codeChallenge": { "image": "data:image/png;base64,...", "length": 5 }
+}
+```
+
+`image_id` и режим защищены подписью. `codeChallenge` служит UI; ожидаемый ответ в нём отсутствует. Виджет возвращает только параметры/подпись в PoW payload, поэтому сервер хранит исходный challenge без `codeChallenge`. Общий `expiresAt` ограничен минимумом PoW TTL и image TTL.
 
 ## POST /api/captcha/challenge
 
@@ -81,7 +93,25 @@ GET /api/captcha/challenge?site_id=example&action=submit_form
 
 Это **новый** серверный payload. Виджет автоматически использует его в событиях `serververification`, `verified` и в скрытом поле `altcha`.
 
-Штатные опции виджета могут добавить `fields` (до 20 строк, до 2000 символов каждая) и `timeZone` (до 100 символов). Backend принимает их, но не анализирует и не хранит; включать их для этой реализации не требуется. Если пришёл `code`, ответ — `GRAPHICS_UNSUPPORTED`. HIS не является полем verification request в штатном пути 3.5.0.
+Штатные опции виджета могут добавить `fields` (до 20 строк, до 2000 символов каждая) и `timeZone` (до 100 символов). Backend принимает их, но не анализирует и не хранит; включать их для этой реализации не требуется. В режиме `pow` лишний `code` отвергается с `CODE_UNEXPECTED`. В режиме `pow+image` `code` обязателен; пробелы по краям удаляются, ASCII-буквы приводятся к верхнему регистру. HIS не является полем verification request в штатном пути 3.5.0.
+
+При штатном image-задании виджет сам отправляет:
+
+```json
+{"payload":"<original PoW base64>","code":"<user answer>"}
+```
+
+Подлинность PoW проверяется до применения image-попытки. Только после проверки ответа Lua завершает image, погашает PoW и регистрирует JWT. Токен включает `captcha_mode=pow+image`, `image_id`, `image_verified=true`; внутренний API требует эти claims для image-политики.
+
+Ожидаемые image-отказы возвращают **HTTP 200** без token payload:
+
+```json
+{"verified":false,"reason":"IMAGE_INCORRECT"}
+```
+
+Причины: `IMAGE_CODE_REQUIRED`, `IMAGE_CODE_INVALID`, `IMAGE_INCORRECT`, `IMAGE_ALREADY_ATTEMPTED`, `IMAGE_NOT_USABLE`, `IMAGE_RATE_LIMITED`, а также ошибки PoW/контекста/TTL после разбора image payload. Это обеспечивает штатное состояние error вместо зависания Code-пути на thrown HTTP error. Неверный допустимый code закрывает изображение после одной попытки; PoW-used и token permit не создаются. Missing/malformed code и неверный PoW не закрывают изображение. Следующая UI-попытка — клик по checkbox, новое изображение и PoW.
+
+Неисправность Redis остаётся HTTP 503, общая HTTP-квота — 429, ошибки схемы/разбора — 400. Ограничение их восстановления в Widget 3.5.0 описано в `../ALTCHA_CODE_RETRY_BEHAVIOR.md`; обход frontend не требуется и не добавлен.
 
 ## POST /internal/captcha/validate
 
@@ -115,14 +145,14 @@ Business MS определяет ожидаемый контекст из сво
 
 ## Ошибки
 
-Формат: `{"verified":false,"error":"CODE"}`. Обработчик виджета воспринимает не-2xx как ошибку проверки.
+Для HTTP-ошибок формат: `{"verified":false,"error":"CODE"}`. Ожидаемые отказы image-проверки используют описанный выше HTTP 200 soft failure. HTTP >=400 в Code callback может оставить виджет в verifying; это отличается от обычного PoW verify, который выполняется внутри catch внешнего verify().
 
 | HTTP | Примеры кодов |
 | --- | --- |
 | 400 | `REQUEST_INVALID`, `SITE_INVALID`, `ACTION_INVALID`, `POLICY_MISMATCH` |
 | 400 | `PAYLOAD_INVALID`, `CHALLENGE_TAMPERED`, `CHALLENGE_NOT_USABLE`, `CHALLENGE_EXPIRED`, `POW_INVALID`, `POW_REPLAYED`, `KEY_RETIRED` |
 | 400 | `TOKEN_INVALID`, `TOKEN_NOT_USABLE`, `CONTEXT_MISMATCH` |
-| 400 | `HIS_MISSING`, `HIS_INVALID`, `HIS_DISABLED`, `GRAPHICS_UNSUPPORTED` |
+| 400 | `HIS_MISSING`, `HIS_INVALID`, `HIS_DISABLED`, `CODE_UNEXPECTED` |
 | 401 | `SERVICE_UNAUTHORIZED` |
 | 403 | `ORIGIN_FORBIDDEN`, `SERVICE_SCOPE_FORBIDDEN` |
 | 413 | `REQUEST_INVALID` — размер тела больше 32 KiB |

@@ -23,7 +23,9 @@
   const output = document.querySelector('output');
   widget.addEventListener('load', async () => {
     await widget.configure({
-      challenge: 'http://127.0.0.1:3001/api/captcha/challenge?site_id=example&action=submit_form',
+      challenge: 'http://127.0.0.1:3001/api/captcha/challenge?' + new URLSearchParams({
+        site_id: 'example', action: new URLSearchParams(location.search).get('action') || 'submit_form',
+      }),
       verifyUrl: 'http://127.0.0.1:3001/api/captcha/verify',
     });
   }, { once: true });

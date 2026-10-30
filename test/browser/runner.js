@@ -13,7 +13,7 @@ const claims = token => JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').r
 async function solveWithWidget() {
   await widget.verify();
   check(widget.getState() === 'verified', `Widget state: ${widget.getState()}`);
-  await new Promise(requestAnimationFrame);
+  await new Promise(resolve => setTimeout(resolve, 0));
   const token = new FormData(document.querySelector('form')).get('altcha');
   check(typeof token === 'string' && token.split('.').length === 3, 'Native hidden form field must contain server JWT');
   return token;
@@ -67,6 +67,52 @@ widget.addEventListener('load', async () => {
         widget.reset(); await widget.configure({ verifyUrl: '/api/captcha/verify' });
         check(claims(await solveWithWidget()).policy === 'standard', 'Native retry succeeds');
         equal(methods(await observations()), ['GET /api/captcha/challenge', 'POST /api/captcha/absent', 'GET /api/captcha/challenge', 'POST /api/captcha/verify'], 'Retry fetches a new challenge');
+        break;
+      }
+      case 'image-business':
+      case 'image-wrong-retry':
+      case 'image-his':
+      case 'image-reload': {
+        const waitFor = async condition => { for(let i=0;i<160;i++){ if(condition())return; await new Promise(r=>setTimeout(r,50)); } throw new Error(`Timed out in state ${widget.getState()}`); };
+        const answer = async () => (await (await fetch('/test-answer')).json()).answer;
+        const nativeInput = () => widget.querySelector('.altcha-code-challenge input');
+        const submit = code => { const input=nativeInput(); check(input,'Native Code input'); input.value=code; input.dispatchEvent(new Event('input',{bubbles:true})); input.form.requestSubmit(); };
+        await widget.verify(); await waitFor(()=>widget.getState()==='code');
+        const firstPow = new FormData(document.querySelector('form')).get('altcha');
+        const firstImage = widget.querySelector('.altcha-code-challenge img');
+        check(firstImage && firstImage.src.startsWith('data:image/png;base64,'), 'Real backend PNG rendered by native widget');
+        await waitFor(()=>firstImage.complete && firstImage.naturalWidth>0);
+        check(firstImage.naturalWidth>0,'PNG decodes in browser');
+        const imageSource=firstImage.src;
+        if(window.testCase.name==='image-wrong-retry') {
+          const good=await answer(); submit((good[0]==='A'?'C':'A')+good.slice(1));
+          await waitFor(()=>widget.getState()==='error');
+          check(!nativeInput(),'Wrong answer closes Code UI');
+          check(!events.some(e=>e.type==='verified'),'Partial image/PoW never emits verified');
+          check(new FormData(document.querySelector('form')).get('altcha')===firstPow,'No server token after wrong code');
+          equal(await (await fetch('/test-security')).json(),{permits:0,powUsed:null,attempts:'1'},'No premature PoW consumption or token permit');
+          const rows=await observations(); equal(rows.at(-1).keys,['code','payload'],'Native code verification fields');
+          widget.querySelector('input[type=checkbox]').click();
+          await waitFor(()=>widget.getState()==='code');
+          check(widget.querySelector('.altcha-code-challenge img').src!==imageSource,'Native checkbox fetches new image');
+          check(new FormData(document.querySelector('form')).get('altcha')!==firstPow,'Native retry solves new PoW');
+          check(nativeInput().value==='','Old answer not retained');
+        } else if(window.testCase.name==='image-reload') {
+          widget.querySelector('.altcha-code-challenge button[type=button]').click();
+          await waitFor(()=>widget.getState()==='verifying'); await waitFor(()=>widget.getState()==='code');
+          check(widget.querySelector('.altcha-code-challenge img').src!==imageSource,'Native reload gives new image and PoW');
+        }
+        submit(await answer()); await waitFor(()=>widget.getState()==='verified'); await new Promise(resolve => setTimeout(resolve, 0));
+        const token=new FormData(document.querySelector('form')).get('altcha');
+        check(claims(token).image_verified===true && claims(token).captcha_mode==='pow+image','Token attests complete image+PoW');
+        if(window.testCase.name==='image-his') {
+          check(claims(token).his_received===true,'Image and HIS compose');
+          equal(methods(await observations()).slice(0,2),['GET /api/captcha/challenge','POST /api/captcha/challenge'],'Native HIS handshake');
+        }
+        if(window.testCase.name==='image-wrong-retry') equal(methods(await observations()),['GET /api/captcha/challenge','POST /api/captcha/verify','GET /api/captcha/challenge','POST /api/captcha/verify'],'No frontend recovery adapter');
+        const body=JSON.stringify({payload:token,message:'image test'});
+        const send=()=>fetch(`${window.testCase.businessOrigin}/api/business/submit`,{method:'POST',headers:{'Content-Type':'application/json'},body});
+        check((await send()).status===200,'Full native image → Business HTTP flow'); check((await send()).status===400,'Image token replay rejected');
         break;
       }
       default: throw new Error('Unknown test case');

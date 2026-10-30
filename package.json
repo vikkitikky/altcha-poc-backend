@@ -14,10 +14,12 @@
     "check": "npm run typecheck && npm test && npm run test:browser && npm run build",
     "demo:business": "tsx examples/business.ts",
     "demo:frontend": "tsx examples/frontend.ts",
-    "test:browser:interactive": "tsx scripts/browser-harness.ts"
+    "test:browser:interactive": "tsx scripts/browser-harness.ts",
+    "test:retry:interactive": "tsx scripts/retry-harness.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.3.1",
+    "@napi-rs/canvas": "1.1.0",
     "altcha-lib": "2.8.0",
     "dotenv": "18.0.8",
     "fastify": "5.12.7",
